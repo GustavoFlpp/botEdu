@@ -1,0 +1,3 @@
+pandas
+py-cord
+python-dotenv
