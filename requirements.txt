@@ -1,3 +1,5 @@
 pandas
 py-cord
 python-dotenv
+gspread
+google-auth
