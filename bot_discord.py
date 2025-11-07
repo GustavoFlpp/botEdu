@@ -14,8 +14,9 @@ LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID'))
 GUILD_ID = int(os.getenv('GUILD_ID'))
 
 USER_MAP = {
-    "Gustavo Felippe": 533170999990943744,
-    "Gustavo Vieira": 1333794382511345685,
+    # "Gustavo Felippe": 533170999990943744,
+    # "Gustavo Vieira": 1333794382511345685,
+    "NIC (2 Entregas)": 1430681991526748323,
     # "Liliene": 1430517863814266932,
     # "Tamires": 1430891026028953742,
     # "Vicente": 1430899113070694580,
@@ -155,6 +156,71 @@ async def verificar_pendencias():
         print(f"Encontradas {pendencias_total} pendências. Tentando enviar DMs...")
         
         for p in pendencias:
+            nome_pessoa = p.get("pessoa")
+            user_id = USER_MAP.get(nome_pessoa)
+
+            if not user_id:
+                if nome_pessoa not in erros_map:
+                    print(f"[AVISO] '{nome_pessoa}' encontrado na planilha, mas não no USER_MAP. DM não será enviada.")
+                    erros_map.append(nome_pessoa)
+                continue
+
+            # Se for lista, pega o primeiro
+            if isinstance(user_id, list):
+                user_id = user_id[0]
+
+            try:
+                # --- Tentativa de DM ---
+                msg = criar_mensagem_pendencia(
+                    pessoa=nome_pessoa,
+                    curso=p.get("curso"),
+                    tarefa=p.get("tarefa"),
+                    dia=p.get("dia")
+                )
+                view = TaskView(pendencia=p)
+
+                destinatario = None
+
+                # Tenta identificar o tipo de destino
+                user = bot.get_user(user_id)
+                if not user:
+                    # Pode ser canal? 
+                    channel = bot.get_channel(user_id)
+                    if channel:
+                        destinatario = channel
+                    else:
+                        # Se não encontrou como canal, tenta buscar como usuário
+                        try:
+                            user = await bot.fetch_user(user_id)
+                            destinatario = user
+                        except:
+                            destinatario = None
+                else:
+                    destinatario = user
+
+                if not destinatario:
+                    raise Exception("ID não corresponde a usuário nem canal válido.")
+
+                # --- Envio ---
+                if isinstance(destinatario, discord.User):
+                    await destinatario.send(msg, view=view)
+                    print(f"  -> DM enviada para {destinatario.name} ({nome_pessoa}) sobre '{p.get('tarefa')}'")
+                elif isinstance(destinatario, (discord.TextChannel, discord.Thread)):
+                    await destinatario.send(f"**{nome_pessoa}**, pendência encontrada! 📋\n\n" + msg, view=view)
+                    print(f"  -> Mensagem enviada no canal '{destinatario.name}' para grupo '{nome_pessoa}' sobre '{p.get('tarefa')}'")
+                else:
+                    raise Exception("Destino não suportado para envio.")
+
+                sucessos_dm += 1
+                await asyncio.sleep(1.5)
+
+            except discord.errors.Forbidden:
+                print(f"[ERRO DM] Falha ao enviar para {nome_pessoa} (ID: {user_id}). Sem permissão ou DMs bloqueadas.")
+                falhas_dm += 1
+            except Exception as e:
+                print(f"[ERRO ENVIO] Erro ao enviar para {nome_pessoa} (ID: {user_id}): {e}")
+                falhas_dm += 1
+
             nome_pessoa = p.get("pessoa")
             user_id = USER_MAP.get(nome_pessoa)
             

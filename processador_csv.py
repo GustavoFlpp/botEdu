@@ -2,6 +2,7 @@ import pandas as pd
 from datetime import datetime
 import time 
 import os
+import re
 from dotenv import load_dotenv
 import gspread 
 from google.oauth2.service_account import Credentials
@@ -86,7 +87,7 @@ def carregar_dataframe(worksheet):
         if h1 and h1 in TAREFAS_PRINCIPAIS:
             current_header = h1
         # Se h1 estiver vazio e h2 for uma coluna principal, reseta o "dono"
-        elif not h1 and h2 in ['Entrega', 'Componente Curricular', 'Etapa', 'Eixo', 'Quant.']:
+        elif not h1 and h2 in ['Entrega', 'Componente Curricular', 'Etapa', '% Conclusão', 'Eixo', 'Quant.']:
             current_header = ""
             
         # Monta o nome da coluna
@@ -183,10 +184,135 @@ def atualizar_status_sheets(row_index, tarefa, novo_status):
         print(f"[ERRO Sheets] Falha ao localizar/atualizar a célula. Detalhe: {e}")
         raise
 
+def normalizar_data(data_str):
+    """
+    Converte datas escritas como '03/nov.' ou '3/dez' para o formato '03/11'.
+    Aceita variações com pontos ou maiúsculas/minúsculas.
+    """
+    if not isinstance(data_str, str):
+        return data_str
+    
+    data_str = data_str.strip().lower().replace('.', '')
+    if not data_str:
+        return data_str
+    
+    # Mapeamento de meses
+    meses = {
+        'jan': '01', 'fev': '02', 'mar': '03', 'abr': '04',
+        'mai': '05', 'jun': '06', 'jul': '07', 'ago': '08',
+        'set': '09', 'out': '10', 'nov': '11', 'dez': '12'
+    }
+    
+    # Expressões que podem aparecer (ex: 03/nov, 3/dez, 09/09)
+    match = re.match(r'(\d{1,2})/([a-z]+|\d{1,2})', data_str)
+    if not match:
+        return data_str  # mantém como está se não casar
+    
+    dia, mes = match.groups()
+    
+    # Padroniza o dia
+    dia = dia.zfill(2)
+    
+    # Se o mês for número (ex: 09), mantém
+    if mes.isdigit():
+        mes = mes.zfill(2)
+    else:
+        mes = meses.get(mes[:3], mes)  # tenta mapear abreviação
+    
+    if mes.isdigit():
+        return f"{dia}/{mes}"
+    return data_str  # caso não consiga mapear o mês
+
 
 # --- Lógica Principal (encontrar_pendencias) ---
 
 def encontrar_pendencias():
+    """
+    Conecta, carrega o DF e itera para encontrar as pendências.
+    (AGORA: ignora tarefas que já têm data em *_Realizado_Data)
+    """
+    start_time = time.time()
+    print("\n--- INICIANDO VERIFICAÇÃO DE PENDÊNCIAS (Google Sheets) ---")
+
+    try:
+        worksheet = conectar_sheets()
+        df = carregar_dataframe(worksheet)
+        
+    except Exception as e:
+        print(f"--- ERRO FATAL AO CARREGAR OS DADOS ---")
+        print(f"Erro: {e}")
+        print("Verificação abortada.")
+        return [] 
+    
+    df = df.dropna(subset=['Componente Curricular'])
+    print(f"[LOG] {len(df)} linhas de cursos válidos encontradas.")
+    
+    pendencias = []
+    total_tarefas_checadas = 0
+    
+    print("\n--- INICIANDO ANÁLISE DETALHADA (Linha por Linha) ---")
+    
+    for index, row in df.iterrows():
+        curso_bruto = row.get('Componente Curricular', '')
+        if pd.isna(curso_bruto) or not curso_bruto:
+            continue
+        curso = str(curso_bruto).strip()
+        
+        print(f"\n[CURSO] {curso} (Linha Sheets: {row['indice_linha_sheets']})")
+        
+        for tarefa in TAREFAS_PRINCIPAIS:
+            total_tarefas_checadas += 1
+            
+            col_resp = f'{tarefa}_Resp'
+            col_status = f'{tarefa}_Status'
+            col_planejado = f'{tarefa}_Planejado'
+            col_realizado = f'{tarefa}_Realizado_Data'  # <- NOVA CHECAGEM AQUI
+            
+            # Verifica se as colunas necessárias existem
+            if any(c not in df.columns for c in [col_resp, col_status, col_planejado]):
+                continue
+                
+            pessoa = row.get(col_resp)
+            status_bruto = row.get(col_status)
+            data_realizado = row.get(col_realizado) if col_realizado in df.columns else None
+            data_planejada = normalizar_data(row.get(col_planejado, "N/A"))
+            
+            log_prefix = f"  -> [TAREFA] {tarefa:<30}"
+            print(f"{log_prefix} | Resp: '{pessoa}' | Status: '{status_bruto}' | Realizado: '{data_realizado}'")
+            
+            pessoa_str = str(pessoa).strip()
+            if pd.isna(pessoa) or pessoa_str in ['-', 'FINALIZADO', '']:
+                print(f"     -> IGNORADO (Responsável inválido ou FINALIZADO)")
+                continue
+            
+            status_str = str(status_bruto).upper().strip()
+            data_realizado_str = str(data_realizado).strip() if isinstance(data_realizado, str) else ""
+            
+            # ⚠️ SE JÁ TEM DATA DE REALIZAÇÃO, IGNORA
+            if data_realizado_str not in ["", "N/A", "nan"]:
+                print(f"     -> IGNORADO (Já possui data de realização: '{data_realizado_str}')")
+                continue
+
+            # ✅ Só conta como pendência se o status for 'TRUE' e não tiver data em Realizado
+            if status_str == 'TRUE':
+                print(f"     -> PENDÊNCIA ENCONTRADA! (Responsável: {pessoa_str})")
+                pendencias.append({
+                    "pessoa": pessoa_str,
+                    "curso": curso,
+                    "tarefa": tarefa.strip(),
+                    "dia": data_planejada,
+                    "row_index": row['indice_linha_sheets']
+                })
+            else:
+                print(f"     -> OK (Status: '{status_str}')")
+
+    end_time = time.time()
+    print("\n--- VERIFICAÇÃO CONCLUÍDA ---")
+    print(f"Tempo de execução: {end_time - start_time:.2f} segundos")
+    print(f"Total de tarefas checadas: {total_tarefas_checadas}")
+    print(f"Total de pendências encontradas: {len(pendencias)}")
+    return pendencias
+
     """
     Conecta, carrega o DF e itera para encontrar as pendências.
     (CORREÇÃO 4: Agora procura pela coluna _Status)
@@ -246,7 +372,8 @@ def encontrar_pendencias():
             
             pessoa_limpo = pessoa_str
             status_str = str(status_bruto).upper().strip()
-            data_planejada = row.get(col_data, "N/A")
+            data_planejada = normalizar_data(row.get(col_data, "N/A"))
+
 
             # Encontrada pendência (Status é 'TRUE')
             if status_str == 'TRUE':
